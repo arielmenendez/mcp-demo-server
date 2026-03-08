@@ -1,7 +1,8 @@
+from typing import List
 from fastmcp import FastMCP
 from pydantic import BaseModel
 from fastapi import HTTPException, status
-from auth import sign_in, get_current_user
+from auth import sign_in, get_current_user, supabase
 from fastmcp.server.dependencies import get_http_headers
 
 app = FastMCP("My Advanced Tool Catalog")
@@ -16,6 +17,90 @@ class UserProfile(BaseModel):
 class Token(BaseModel):
    access_token: str
    token_type: str
+
+class Session(BaseModel):
+    session_id: str
+
+class CartItem(BaseModel):
+    item: str
+    quantity: int
+
+class Cart(BaseModel):
+    session_id: str
+    items: List[CartItem]
+
+@app.tool
+def create_cart() -> Session:
+    """
+    Creates a new persistent shopping session in Supabase and returns a session ID.
+    """
+    try:
+        response = supabase.table("sessions").insert({"state": {"items": []}}).execute()
+        
+        if response.data:
+            session_id = response.data[0]['id']
+            print(f"New cart session created in Supabase: {session_id}")
+            return Session(session_id=session_id)
+        else:
+            raise HTTPException(status_code=500, detail="Failed to create the session in the database.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+
+@app.tool
+def add_to_cart(session_id: str, item: str, quantity: int) -> Cart:
+    """
+    Adds an item to a shopping cart, updating the state in Supabase.
+    """
+    try:
+        response = supabase.table("sessions").select("state").eq("id", session_id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail=f"Session ID '{session_id}' not found.")
+        
+        current_state = response.data[0]['state']
+        cart_items = current_state.get("items", [])
+        
+        found = False
+        for cart_item in cart_items:
+            if cart_item["item"] == item:
+                cart_item["quantity"] += quantity
+                found = True
+                break
+        if not found:
+            cart_items.append({"item": item, "quantity": quantity})
+            
+        new_state = {"items": cart_items}
+        update_response = supabase.table("sessions").update({"state": new_state}).eq("id", session_id).execute()
+
+        if not update_response.data:
+            raise HTTPException(status_code=500, detail="Failed to update the cart in the database.")
+
+        print(f"Item added to cart {session_id}: {quantity}x {item}")
+        return Cart(session_id=session_id, items=[CartItem(**i) for i in cart_items])
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+
+@app.tool
+def view_cart(session_id: str) -> Cart:
+    """
+    Returns the contents of a cart by querying its state in Supabase.
+    """
+    try:
+        response = supabase.table("sessions").select("state").eq("id", session_id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail=f"Session ID '{session_id}' not found.")
+            
+        current_state = response.data[0]['state']
+        cart_items = current_state.get("items", [])
+        print(f"Viewing cart {session_id} from Supabase")
+        return Cart(session_id=session_id, items=[CartItem(**i) for i in cart_items])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
 
 @app.tool()
 async def start_session(email: str, password: str) -> Token:
